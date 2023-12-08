@@ -3,45 +3,110 @@ authors: Steven Bui
 state: draft
 ---
 
-# Remote Job Worker
+# Job Worker
 
-Remote Job Worker consists of three parts: the job library, the client, and the server. These three components will allow a user to remotely issue a Linux command to be ran on a server.
+Job Worker consists of three parts: the job library, the grpc client, and the grpc server. These three components will allow a user to remotely issue Linux commands to be ran on a server.
 
 ## Job Library
-The job library is responsible for executing Linux commands (i.e. `ls`) via os.exec function calls and also responsible for cpu, memory, and disk io limits via Linux's cgroup.
+The job library is responsible for executing Linux commands (i.e. `ls`) via os.exec function calls and also responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be logged to disk in order for concurrent access to a process's output.
 
 For this project, there will be no blacklist/whitelist of commands that a client can issue the server to run. Normally, this would be a major security flaw as it would allow anyone who has access to the client to run anything they wish on the server.
 
-### CPU, MEM, DISK IO Limits CGroups
+The following data structures will be used to represent the job/process
+```
+// key: username
+// value: array of pids
+userJobs := map[string][]string
+```
+
+The map will be keeping track and used to look up what jobs a specific user has ran. 
+
+```
+type pidInfo struct {
+    string status
+    output strings.Builder
+}
+
+// key: pid
+// value: pid info
+jobInfo := map[string]pidInfo
+``````
+
+This map and struct will be for looking up the process and information related to the process.
+
+- StartJob insert/update `userJobs` and `jobInfo` maps
+- StopJob update the `pidInfo`` status
+- QueryJob will look up the pid inside the `jobInfo`` for the `pidInfo``
+
+Since the library supports concurrent jobs and users, mutexes will be used to ensure consistency.
+
+### CPU, MEM, DISK IO Limits via CGroup
 
 CGroups on linux is a mechanism to limit the amount of CPU, memory, and disk io a process can use.
 
 The limits will use default hardcoded values in the project to save time. Future improvements can introduce a configuration file or command line arguments to override the default values.
 
-Initial CGroup folder will be a `/sys/fs/cgroup/remote-jobs/` folder. Any users will be added under the remote-jobs folder and any job will be under the user folder.
+Initial CGroup folder will be a `/sys/fs/cgroup/jobworker/` folder. Any users will be added under the jobworker folder and any job will be added in the `cgroup.procs` file.
 
 An example file structure is:
 ```
-/sys/fs/cgroup/remote-jobs/
-/sys/fs/cgroup/remote-jobs/alice
-/sys/fs/cgroup/remote-jobs/alice/job0
-/sys/fs/cgroup/remote-jobs/alice/job1
-/sys/fs/cgroup/remote-jobs/alice/job2
-/sys/fs/cgroup/remote-jobs/bob
-/sys/fs/cgroup/remote-jobs/bob/job0
-/sys/fs/cgroup/remote-jobs/carl
+/sys/fs/cgroup/jobworker/
+/sys/fs/cgroup/jobworker/alice
+/sys/fs/cgroup/jobworker/bob
+/sys/fs/cgroup/jobworker/carl
 ```
+
+The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the contents with the default values 10000 for CPU time, 128000 for memory, and 120 wiops:
+
+**cpu.max**<br>
+`100000 200000`
+
+**mem.max**<br>
+`128000`
+
+**io.max**<br>
+`8:0 rbps=max wbps=1024 riops=max wiops=120`
 
 Adding pid to cgroup `echo pid > /sys/fs/cgroup/remote-tasks/alice/cgroup.procs`
 
-
 ## Client/Server
 
-### How to Run
+For ease of use, the client will support only a single server with hardcoded a port number. The default server will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
+
+| command line option | description |
+| ----------- | ----------- |
+| -u | changes user profile: alice, bob, carl |
+| -h | changes the host |
+
+The server will be responsible for authn via mTLS, authz, and the jobs. It will not have any persistent storage. Therefore, server restarts will wipe out any job information it had stored in memory.
+
+The client will periodically check the stream to display new logs. 
 
 ### Proto Specification
 
-Include any `.proto` changes or additions that are necessary for your design.
+```
+message WorkerStartRequest {
+  string command = 1;
+}
+
+message WorkerPIDRequest{
+  string pid = 1;
+}
+
+message WorkerResponse {
+  string pid = 1;
+  string log = 2;
+}
+
+service Worker {
+  rpc JobStop(WorkerPIDRequest) returns (WorkerResponse) {}
+
+  rpc JobStart(WorkerStartRequest) returns (stream WorkerResponse) {}
+
+  rpc JobQuery(WorkerPIDRequest) returns (stream WorkerResponse) {}
+}
+
+```
 
 ### Security
 #### mTLS
@@ -58,23 +123,30 @@ Both client and server will stem from the same self-signed CA, which both the cl
 
 The subject string of the certificate will be:
 ```
-subj /C=US/ST=CA/L=SF/O=JobWorker/CN=Alice/
+subj /C=US/ST=CA/L=SF/O=JobWorker/CN=alice/
 ```
-The CN (Common Name) will be used to identify the client. For this project, there will be 3 clients: Alice, Bob, and Carl and one server: Worker.
+The CN (Common Name) will be used to identify the client. For this project, there will be 3 clients: alice, bob, and carl and one server: worker.
 
 
 #### Authorization
 
-### Client UX
+GRPC authorization will be done with Authz golang package with a simple authorization requiring username, which is the TLS certificate common name. Static unary and stream interceptors will be created to perform the authz check. The server will verify if the username matches one of the known users that has access. If the username field matches the hardcoded "alice" or "bob" values, full access will be allowed to the APIs by adding the following key-value pairs in the metadata: 
 
+| API         | Metadata Key Pairs   |
+| ----------- | ----------- |
+| JobStart    | allow_start=true |
+| JobStop     | allow_stop=true |
+| JobQuery    | allow_query=true |
 
-### Server UX
+Alice and Bob will have full access. Carl will have a valid certificate but will not have any access to any API and can be used to test authorization.
 
+This method is very similar to passing an API key. Security-wise, it's okay since the TLS certificates are signed by a CA cert and the server trusts the CA. It's not a scalable solution because it's static. Adding a user database resolves the static user issue but performance remains an issue for each API request to check against the database. Extending the implementation to a token auth would resolve the scalability issue.
 
 ## Test Plan
 
 Unit tests will be written for the job library.
 
-Integration testing will be done via the client and server.
+Integration testing will be done via the client and server to ensure it's functioning correctly.
+* Connect localhost
 
 A 3rd party program "stress" will be used to stress the machine for CPU, Mem, and Disk IO.
