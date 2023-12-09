@@ -12,6 +12,17 @@ The job library is responsible for executing Linux commands (i.e. `ls`) via os.e
 
 For this project, there will be no blacklist/whitelist of commands that a client can issue the server to run. Normally, this would be a major security flaw as it would allow anyone who has access to the client to run anything they wish on the server.
 
+### Library Interface
+
+The following will be exported funcs to be used by the server
+
+```
+(j *JobWorker) StartJob(username, command string) (response, error)
+(j *JobWorker) StopJob(id string) error
+(j *JobWorker) QueryJob(id string) (response, error)
+```
+
+### Data Structures
 The following data structures will be used to represent the job/process
 ```
 // key: username
@@ -19,9 +30,12 @@ The following data structures will be used to represent the job/process
 userJobs := map[string][]string
 ```
 
-The map will be keeping track and used to look up what jobs a specific user has ran. 
+The map will be keeping track and used to look up what jobs a specific user has ran. This provides added security where it prevent users from accessing other user processes.
 
 ```
+// pidInfo represents the process
+// status: process is either running or stopped
+// output: output of the process
 type pidInfo struct {
     string status
     output strings.Builder
@@ -34,19 +48,28 @@ jobInfo := map[string]pidInfo
 
 This map and struct will be for looking up the process and information related to the process.
 
-- StartJob insert/update `userJobs` and `jobInfo` maps
-- StopJob update the `pidInfo`` status
-- QueryJob will look up the pid inside the `jobInfo`` for the `pidInfo``
+```
+type JobWorker struct {
+    userJobs map[string][]string
+    jobInfo map[string]pidInfo
+}
+```
 
-Since the library supports concurrent jobs and users, mutexes will be used to ensure consistency.
+The library will be initialized with JobWorker struct. 
+
+Since the library supports concurrent jobs and users, mutexes will be used to ensure consistency for the data structures and files being modified.
+
+- StartJob check if username exists in `userJobs` and will handle creation or update accordingly. The `jobInfo` map will be populated with a job
+- StopJob update the `pidInfo`` status to stopped
+- QueryJob will look up the pid inside the `userJob` map first before looking inside the `jobInfo` map for the `pidInfo`. Then it would stream the output.
 
 ### CPU, MEM, DISK IO Limits via CGroup
 
-CGroups on linux is a mechanism to limit the amount of CPU, memory, and disk io a process can use.
+CGroups on linux is a mechanism to limit the amount of CPU, memory, and disk io a process can use. There are two versions of cgroups which are v1 and v2. Modern Linux OSes will use cgroup v2, which this library will only support.
 
 The limits will use default hardcoded values in the project to save time. Future improvements can introduce a configuration file or command line arguments to override the default values.
 
-Initial CGroup folder will be a `/sys/fs/cgroup/jobworker/` folder. Any users will be added under the jobworker folder and any job will be added in the `cgroup.procs` file.
+Initial cgroup folder will be a `/sys/fs/cgroup/jobworker/` folder. Any users will be added under the jobworker folder and any job will be added in the `cgroup.procs` file.
 
 An example file structure is:
 ```
@@ -56,31 +79,47 @@ An example file structure is:
 /sys/fs/cgroup/jobworker/carl
 ```
 
-The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the contents with the default values 10000 for CPU time, 128000 for memory, and 120 wiops:
+The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the contents with the default values 100000 microseconds CPU time in a 200000 microsecond period, 134217728 (128MB) for memory max, 1MB for wbps and 120 wiops:
 
 **cpu.max**<br>
 `100000 200000`
 
 **mem.max**<br>
-`128000`
+`134217728`
 
 **io.max**<br>
-`8:0 rbps=max wbps=1024 riops=max wiops=120`
+`8:0 rbps=max wbps=1048576 riops=max wiops=120`
 
-Adding pid to cgroup `echo pid > /sys/fs/cgroup/remote-tasks/alice/cgroup.procs`
+Adding pid to cgroup will be with: `echo pid > /sys/fs/cgroup/remote-tasks/alice/cgroup.procs`
 
 ## Client/Server
+### Client
+For ease of use, the client will support only a single server with hardcoded a port number. The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
 
-For ease of use, the client will support only a single server with hardcoded a port number. The default server will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
+To run the client: `jobworker [flags] [start/stop/query] command/pid`
 
 | command line option | description |
 | ----------- | ----------- |
 | -u | changes user profile: alice, bob, carl |
 | -h | changes the host |
 
+Examples:
+```
+jobworker -u bob start ls
+jobworker -h 127.0.0.1 stop 3
+jobworker query 3
+```
+
+After a job is started, the client will periodically check the stream to display new output from the job until it has completed.
+
+After a job is queried, the client will output everything from the beginning to latest. If the job is still running, it will periodically check the stream to display new output from the job.
+
+The client will receive a confirmation that a job is stopped
+
+### Server
 The server will be responsible for authn via mTLS, authz, and the jobs. It will not have any persistent storage. Therefore, server restarts will wipe out any job information it had stored in memory.
 
-The client will periodically check the stream to display new logs. 
+To run the server: `jobserver`
 
 ### Proto Specification
 
@@ -114,6 +153,11 @@ Transport Layer Security (TLS) is a method of authenticating and establishing a 
 
 Mutual TLS (mTLS) is an extension of TLS where both the client and server authenticate themselves through their certificates. Since both client and server certificates come from the same organization CA cert, they trust each other.
 
+By default, grpc uses either TLS 1.2 or TLS 1.3. The TLS 1.2 is the current standard but is full of security vulnerable ciphers. The industry is slowly moving toward TLS 1.3 for better security and performance. The server will be set to only support TLS 1.3 as a minimum via the `tls.Config`. In addition, only the modern ciphers will be in the cipher pool to be used.
+
+List of modern ciphers:
+https://developers.cloudflare.com/ssl/reference/cipher-suites/recommendations/
+
 ##### Setup
 Mutual TLS will be used between the client and server to authenticate and encrypt the communication between the two. 
 
@@ -142,11 +186,14 @@ Alice and Bob will have full access. Carl will have a valid certificate but will
 
 This method is very similar to passing an API key. Security-wise, it's okay since the TLS certificates are signed by a CA cert and the server trusts the CA. It's not a scalable solution because it's static. Adding a user database resolves the static user issue but performance remains an issue for each API request to check against the database. Extending the implementation to a token auth would resolve the scalability issue.
 
+## Build / Package
+Github Actions will be used to build and package the client and server. The end result will be a tar.gz file that can be unpacked and ran without having to generate certificates.
+
 ## Test Plan
 
-Unit tests will be written for the job library.
+Unit tests will be written to test the job library, authn, and authz.
 
 Integration testing will be done via the client and server to ensure it's functioning correctly.
 * Connect localhost
 
-A 3rd party program "stress" will be used to stress the machine for CPU, Mem, and Disk IO.
+A 3rd party program "stress" will be used to stress the machine for CPU, Mem, and Disk IO limits.
