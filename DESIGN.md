@@ -5,20 +5,31 @@ state: draft
 
 # Job Worker
 
-Job Worker consists of three parts: the job library, the grpc client, and the grpc server. These three components will allow a user to remotely issue Linux commands to be ran on a server.
+Job Worker consists of three parts: the job library, the grpc client, and the grpc server. These three components together will allow a user to remotely issue Linux commands to be ran on a GRPC server.
+
+For this project, there will be no blacklist/whitelist of commands that a client can issue the server to run. Normally, this would be a major security flaw as it would allow anyone who has access to the client to run anything they wish, which can end up destorying the server.
 
 ## Job Library
-The job library is responsible for executing Linux commands (i.e. `ls`) via os.exec function calls and also responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be logged to disk in order for concurrent access to a process's output.
-
-For this project, there will be no blacklist/whitelist of commands that a client can issue the server to run. Normally, this would be a major security flaw as it would allow anyone who has access to the client to run anything they wish on the server.
+The job library is responsible for executing Linux commands (i.e. `ls`) via os.exec function calls and also is responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be stored in a buffer in memory in order for concurrent access to a process's output.
 
 ### Library Interface
 
 The following will be exported funcs to be used by the server
 
 ```
+// StartJob starts a job by executing the command
+// input: the name of the user and command to run
+// output: response containing job output and id; error if any
 (j *JobWorker) StartJob(username, command string) (response, error)
+
+// StopJob stops a job using the id sent in
+// input: id of job
+// output: error if any; nil respresents success
 (j *JobWorker) StopJob(id string) error
+
+// QueryJob shows job status and stream output
+// input: id of job
+// output: response containing job output and id; error if any
 (j *JobWorker) QueryJob(id string) (response, error)
 ```
 
@@ -30,7 +41,7 @@ The following data structures will be used to represent the job/process
 userJobs := map[string][]string
 ```
 
-The map will be keeping track and used to look up what jobs a specific user has ran. This provides added security where it prevent users from accessing other user processes.
+The map will be keeping track and used to look up what jobs a specific user has ran. This provides an added security where it prevent users from accessing other user processes.
 
 ```
 // pidInfo represents the process
@@ -55,9 +66,7 @@ type JobWorker struct {
 }
 ```
 
-The library will be initialized with JobWorker struct. 
-
-Since the library supports concurrent jobs and users, mutexes will be used to ensure consistency for the data structures and files being modified.
+The library will be initialized with JobWorker struct. Since the library supports concurrent jobs and users, mutexes will be used to ensure consistency for the data structures and files being modified.
 
 - StartJob check if username exists in `userJobs` and will handle creation or update accordingly. The `jobInfo` map will be populated with a job
 - StopJob update the `pidInfo`` status to stopped
@@ -79,7 +88,7 @@ An example file structure is:
 /sys/fs/cgroup/jobworker/carl
 ```
 
-The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the contents with the default values 100000 microseconds CPU time in a 200000 microsecond period, 134217728 (128MB) for memory max, 1MB for wbps and 120 wiops:
+The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the contents with the hardcoded default values 100000 microseconds CPU time in a 200000 microsecond period, 134217728 (128MB) for memory max, 1MB for wbps and 120 wiops:
 
 **cpu.max**<br>
 `100000 200000`
@@ -90,11 +99,11 @@ The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the 
 **io.max**<br>
 `8:0 rbps=max wbps=1048576 riops=max wiops=120`
 
-Adding pid to cgroup will be with: `echo pid > /sys/fs/cgroup/remote-tasks/alice/cgroup.procs`
+New jobs will add their pid to cgroup file in their respective user folders. For example: `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`
 
 ## Client/Server
 ### Client
-For ease of use, the client will support only a single server with hardcoded a port number. The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
+For ease of use, the client will support only a single server with hardcoded a port number 57533 (random high number port to avoid port conflicts). The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
 
 To run the client: `jobworker [flags] [start/stop/query] command/pid`
 
@@ -153,7 +162,7 @@ Transport Layer Security (TLS) is a method of authenticating and establishing a 
 
 Mutual TLS (mTLS) is an extension of TLS where both the client and server authenticate themselves through their certificates. Since both client and server certificates come from the same organization CA cert, they trust each other.
 
-By default, grpc uses either TLS 1.2 or TLS 1.3. The TLS 1.2 is the current standard but is full of security vulnerable ciphers. The industry is slowly moving toward TLS 1.3 for better security and performance. The server will be set to only support TLS 1.3 as a minimum via the `tls.Config`. In addition, only the modern ciphers will be in the cipher pool to be used.
+By default, grpc uses either TLS 1.2 or TLS 1.3. The TLS 1.2 is the current standard but is full of security vulnerable ciphers. The industry is slowly moving toward TLS 1.3 for better security and performance. The server will be set to only support TLS 1.3 as a minimum via the `tls.Config`. In addition, only the modern ciphers will be in the cipher pool to be used by specifying them in the cert pool.
 
 List of modern ciphers:
 https://developers.cloudflare.com/ssl/reference/cipher-suites/recommendations/
@@ -194,6 +203,5 @@ Github Actions will be used to build and package the client and server. The end 
 Unit tests will be written to test the job library, authn, and authz.
 
 Integration testing will be done via the client and server to ensure it's functioning correctly.
-* Connect localhost
 
 A 3rd party program "stress" will be used to stress the machine for CPU, Mem, and Disk IO limits.
