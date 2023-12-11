@@ -99,7 +99,7 @@ The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the 
 **io.max**<br>
 `8:0 rbps=max wbps=1048576 riops=max wiops=120`
 
-New jobs will add their pid to cgroup file in their respective user folders. For example: `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`
+New jobs will add their pid to cgroup file in their respective user folders. For example: `/sys/fs/cgroup/jobworker/alice/cgroup.procs`
 
 ## Client/Server
 ### Client
