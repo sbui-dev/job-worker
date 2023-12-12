@@ -10,7 +10,9 @@ Job Worker consists of three parts: the job library, the grpc client, and the gr
 For this project, there will be no blacklist/whitelist of commands that a client can issue the server to run. Normally, this would be a major security flaw as it would allow anyone who has access to the client to run anything they wish, which can end up destorying the server.
 
 ## Job Library
-The job library is responsible for executing Linux commands (i.e. `ls`) via os.exec function calls and also is responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be stored in a buffer in memory in order for concurrent access to a process's output.
+The job library is responsible for executing Linux commands (i.e. `ls`) via `exec.Command` function calls and also is responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be stored in a buffer in memory in order for concurrent access to a process's output.
+
+The library will use UUIDs as job id to keep track of jobs.
 
 ### Library Interface
 
@@ -37,40 +39,38 @@ The following will be exported funcs to be used by the server
 The following data structures will be used to represent the job/process
 ```
 // key: username
-// value: array of pids
+// value: array of job ids
 userJobs := map[string][]string
 ```
 
 The map will be keeping track and used to look up what jobs a specific user has ran. This provides an added security where it prevent users from accessing other user processes.
 
 ```
-// pidInfo represents the process
+// processInfo represents the process
+// pid: pid assigned by the linux os
 // status: process is either running or stopped
 // output: output of the process
-type pidInfo struct {
-    string status
+type processInfo struct {
+    pid string
+    status string
     output strings.Builder
 }
 
-// key: pid
+// key: job id
 // value: pid info
-jobInfo := map[string]pidInfo
+jobInfo := map[string]processInfo
 ``````
 
-This map and struct will be for looking up the process and information related to the process.
+This jobInfo map with processInfo struct will be for looking up the process and information related to the process.
 
 ```
 type JobWorker struct {
     userJobs map[string][]string
-    jobInfo map[string]pidInfo
+    jobInfo map[string]processInfo
 }
 ```
 
 The library will be initialized with JobWorker struct. Since the library supports concurrent jobs and users, mutexes will be used to ensure consistency for the data structures and files being modified.
-
-- StartJob check if username exists in `userJobs` and will handle creation or update accordingly. The `jobInfo` map will be populated with a job
-- StopJob update the `pidInfo`` status to stopped
-- QueryJob will look up the pid inside the `userJob` map first before looking inside the `jobInfo` map for the `pidInfo`. Then it would stream the output.
 
 ### CPU, MEM, DISK IO Limits via CGroup
 
@@ -99,12 +99,23 @@ The following files will be edited: `cpu.max`, `mem.max`, and `io.max` with the 
 **io.max**<br>
 `8:0 rbps=max wbps=1048576 riops=max wiops=120`
 
+`8:0` represents the `/dev/sda`
+
 New jobs will add their pid to cgroup file in their respective user folders. For example: `/sys/fs/cgroup/jobworker/alice/cgroup.procs`
+
+### Job Life Cycle
+
+StartJob func checks if username exists in `userJobs` and will handle creation or update a user's job array accordingly. It will split the user command into a string array and use `exec.Command([]user_command_array)`. Then update the `jobInfo` map with a new job struct containing the pid, running status, and the output. The pid will be added to the user's cgroup i.e. `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`.
+
+StopJob func use `exec.Command("kill -9 <pid>")` and update the `pidInfo` status to stopped.
+
+QueryJob func will look up the pid inside the `userJob` map first before looking inside the `jobInfo` map for the `pidInfo`. Then it would stream the output.
 
 ## Client/Server
 ### Client
 For ease of use, the client will support only a single server with hardcoded a port number 57533 (random high number port to avoid port conflicts). The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
 
+#### Client CLI
 To run the client: `jobworker [flags] [start/stop/query] command/pid`
 
 | command line option | description |
@@ -160,7 +171,7 @@ service Worker {
 #### mTLS
 Transport Layer Security (TLS) is a method of authenticating and establishing a secure communication channel between a client and server. As part of TLS, the client verifies the server through a trusted 3rd party known as a Certificate Authority that issued the public/private certificates. After the server verificaiton is completed, they both agree upon an encryption cipher to use for communication. Then the server authenticates the client through basic authentication or some other method.
 
-Mutual TLS (mTLS) is an extension of TLS where both the client and server authenticate themselves through their certificates. Since both client and server certificates come from the same organization CA cert, they trust each other.
+Mutual TLS (mTLS) is an extension of TLS where both the client and server authenticate themselves through their certificates. Since both client and server trust each other's CA certificates, they trust each other.
 
 By default, grpc uses either TLS 1.2 or TLS 1.3. The TLS 1.2 is the current standard but is full of security vulnerable ciphers. The industry is slowly moving toward TLS 1.3 for better security and performance. The server will be set to only support TLS 1.3 as a minimum via the `tls.Config`. In addition, only the modern ciphers will be in the cipher pool to be used by specifying them in the cert pool.
 
@@ -172,20 +183,51 @@ Mutual TLS will be used between the client and server to authenticate and encryp
 
 The certificate authory, client, and server certificates will be pregenerated self-signed certificates that will be checked into the code repository for ease of use. This is a bad security practice, but doing it the secure way would require setting up a secret management and/or a certificate provision tool which is out of scope for this project.
 
-Both client and server will stem from the same self-signed CA, which both the client and server will load the CA cert along with their respective public and private keys during startup.
+The client certificates from the same self-signed CA and the server will have it's own self-signed CA cert. Both the client and server will load the other's CA cert along with their respective public and private keys during startup.
 
-The subject string of the certificate will be:
+Certificates will be RSA 4096 bits with SHA256 hash. OpenSSL recommends using at least 2048 bits for secured certificates. There is a trade off between 2048 and 4096 bits which increased server CPU usage for security. However, this particular server isn't expected to have a high load of traffic so it'll be using the more secure 4096 bits.
+
+Alternatively in the future, ECDSA certificates can be used to increase security and performance. ECC with shorter keys provides same amount of security as RSA. RSA is the current standard that has been used for a long time while is the modern ECDSA is gaining adoption. The certificates will be RSA since it is easier to setup and use.
+
+Certificates will be generated on command line using openssl. Example:
+```
+openssl req -x509                                        \
+  -newkey rsa:4096                                       \
+  -nodes                                                 \
+  -days 365                                              \
+  -keyout server_ca_key.pem                              \
+  -out server_ca_cert.pem                                \
+  -subj /C=US/ST=CA/L=SF/O=JobWorker/CN=job-server_ca/   \
+  -sha256
+
+openssl genrsa -out server_key.pem 4096
+openssl req -new                                      \
+  -key server_key.pem                                 \
+  -days 365                                           \
+  -out server_csr.pem                                 \
+  -subj /C=US/ST=CA/L=SF/O=JobWorker/CN=job-server/
+
+openssl x509 -req           \
+  -in server_csr.pem        \
+  -CAkey server_ca_key.pem  \
+  -CA server_ca_cert.pem    \
+  -days 365                 \
+  -out server_cert.pem      \
+  -set_serial 1             \
+  -sha256
+```
+
+The subject string of the client certificate will be:
 ```
 subj /C=US/ST=CA/L=SF/O=JobWorker/CN=alice/
 ```
 The CN (Common Name) will be used to identify the client. For this project, there will be 3 clients: alice, bob, and carl and one server: worker.
 
-
 #### Authorization
 
 GRPC authorization will be done with Authz golang package with a simple authorization requiring username, which is the TLS certificate common name. Static unary and stream interceptors will be created to perform the authz check. The server will verify if the username matches one of the known users that has access. If the username field matches the hardcoded "alice" or "bob" values, full access will be allowed to the APIs by adding the following key-value pairs in the metadata: 
 
-| API         | Metadata Key Pairs   |
+| API         | Metadata Key Pairs |
 | ----------- | ----------- |
 | JobStart    | allow_start=true |
 | JobStop     | allow_stop=true |
