@@ -10,7 +10,7 @@ Job Worker consists of three parts: the job library, the grpc client, and the gr
 For this project, there will be no blacklist/whitelist of commands that a client can issue the server to run. Normally, this would be a major security flaw as it would allow anyone who has access to the client to run anything they wish, which can end up destorying the server.
 
 ## Job Library
-The job library is responsible for executing Linux commands (i.e. `ls`) via `exec.Command` function calls and also is responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be stored in a buffer in memory in order for concurrent access to a process's output.
+The job library is responsible for executing Linux commands (i.e. `ls`) via `exec.CommandContext` function calls and also is responsible for cpu, memory, and disk io limits via Linux's cgroup. All output will be stored in a channel for streaming and a buffer in memory in order for concurrent access to a process's output.
 
 The library will use UUIDs as job id to keep track of jobs.
 
@@ -19,20 +19,25 @@ The library will use UUIDs as job id to keep track of jobs.
 The following will be exported funcs to be used by the server
 
 ```
-// StartJob starts a job by executing the command
-// input: the name of the user and command to run
-// output: response containing job output and id; error if any
-(j *JobWorker) StartJob(username, command string) (response, error)
+// NewJob creates a new job
+func NewJob(command []string) (*Job, error)
 
-// StopJob stops a job using the id sent in
-// input: id of job
-// output: error if any; nil respresents success
-(j *JobWorker) StopJob(id string) error
+// Start starts a job by executing the command
+func (jw *Job) Start()
 
-// QueryJob shows job status and stream output
-// input: id of job
-// output: response containing job output and id; error if any
-(j *JobWorker) QueryJob(id string) (response, error)
+// Stop stops a job using the id sent in
+func (jw *Job) Stop()
+
+// Query shows job status
+func (jw *Job) Query(jobID string)
+
+// GetOutputChannel gets job output channel for streaming process output
+// return: go channel of output
+func (jw *Job) GetOutputChannel() chan string
+
+// GetDoneChannel gets done channel to block until process is completed
+// return: go channel of done
+func (jw *Job) GetDoneChannel() chan bool
 ```
 
 ### Data Structures
@@ -46,27 +51,32 @@ userJobs := map[string][]string
 The map will be keeping track and used to look up what jobs a specific user has ran. This provides an added security where it prevent users from accessing other user processes.
 
 ```
-// processInfo represents the process
-// pid: pid assigned by the linux os
-// status: process is either running or stopped
-// output: output of the process
-type processInfo struct {
-    pid string
-    status string
-    output strings.Builder
+// jobInfo represents the job
+// ctx: context to cancel the job
+// status: job is either running or stopped
+// output: output of the job
+type JobInfo struct {
+	JobID      string
+	status     string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	outputChan chan string
+	done       chan bool
+	command    []string
+  output     strings.Builder
 }
 
 // key: job id
 // value: pid info
-jobInfo := map[string]processInfo
+jobInfo := map[string]jobInfo
 ``````
 
-This jobInfo map with processInfo struct will be for looking up the process and information related to the process.
+This jobInfo map with jobInfo struct will be for looking up the process and information related to the process.
 
 ```
 type JobWorker struct {
     userJobs map[string][]string
-    jobInfo map[string]processInfo
+    jobInfo map[string]jobInfo
 }
 ```
 
@@ -105,29 +115,41 @@ New jobs will add their pid to cgroup file in their respective user folders. For
 
 ### Job Life Cycle
 
-StartJob func checks if username exists in `userJobs` and will handle creation or update a user's job array accordingly. It will split the user command into a string array and use `exec.Command([]user_command_array)`. Then update the `jobInfo` map with a new job struct containing the pid, running status, and the output. The pid will be added to the user's cgroup i.e. `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`.
+Start func checks if username exists in `userJobs` map and will handle creation or update a user's job array accordingly. The command line parser library will return user command as a string array, which the server will use `exec.CommandContext(ctx, []user_command_array)`. Then update the `jobInfo` map with a new job struct containing: a uuid for the job, running status, and the output. The pid will be added to the user's cgroup i.e. `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`.
 
-StopJob func use `exec.Command("kill -9 <pid>")` and update the `pidInfo` status to stopped.
+Stop func will use the stored context cancel with the `exec.CommandContext()` to kill the process and update the `jobInfo` status to stopped.
 
-QueryJob func will look up the pid inside the `userJob` map first before looking inside the `jobInfo` map for the `pidInfo`. Then it would stream the output.
+Query func will look up the pid inside the `userJob` map first before looking inside the `jobInfo` map for the `job`. Then it display the job status.
+
+GetOutputChannel func and GetDoneChannel func are both used to get a stream output from the running process.
 
 ## Client/Server
 ### Client
-For ease of use, the client will support only a single server with hardcoded a port number 57533 (random high number port to avoid port conflicts). The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
+A third party command line parser will be used to parse arguments. For ease of use, the client will support only a single server with hardcoded a port number 57533 (random high number port to avoid port conflicts). The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
 
 #### Client CLI
-To run the client: `jobworker [flags] [start/stop/query] command/pid`
-
-| command line option | description |
-| ----------- | ----------- |
-| -u | changes user profile: alice, bob, carl |
-| -h | changes the host |
-
-Examples:
 ```
-jobworker -u bob start ls
-jobworker -h 127.0.0.1 stop 3
-jobworker query 3
+usage: jobclient [<flags>] <command> [<args> ...]
+
+A command-line job client.
+
+Flags:
+  --[no-]help               Show context-sensitive help (also try --help-long and --help-man).
+  --addr="localhost:50005"  The address to connect to
+  --user="alice"            Name of user: alice, bob, carl
+
+Commands:
+help [<command>...]
+    Show help.
+
+start <command>...
+    Start a job
+
+stop <id>
+    Stop a job
+
+query <id>
+    Query a job
 ```
 
 After a job is started, the client will periodically check the stream to display new output from the job until it has completed.
@@ -145,26 +167,37 @@ To run the server: `jobserver`
 
 ```
 message WorkerStartRequest {
-  string command = 1;
+  repeated string command = 1;
 }
 
-message WorkerPIDRequest{
-  string pid = 1;
+message WorkerStopRequest{
+  string jobID = 1;
 }
 
-message WorkerResponse {
-  string pid = 1;
+message WorkerQueryRequest{
+  string jobID = 1;
+}
+
+message WorkerStartResponse {
+  string jobID = 1;
+  string log = 2;
+}
+
+message WorkerStopResponse {
+}
+
+message WorkerQueryResponse {
+  string jobID = 1;
   string log = 2;
 }
 
 service Worker {
-  rpc JobStop(WorkerPIDRequest) returns (WorkerResponse) {}
+  rpc JobStop(WorkerStopRequest) returns (WorkerStopResponse) {}
 
-  rpc JobStart(WorkerStartRequest) returns (stream WorkerResponse) {}
+  rpc JobStart(WorkerStartRequest) returns (stream WorkerStartResponse) {}
 
-  rpc JobQuery(WorkerPIDRequest) returns (stream WorkerResponse) {}
+  rpc JobQuery(WorkerQueryRequest) returns (stream WorkerQueryResponse) {}
 }
-
 ```
 
 ### Security
@@ -225,20 +258,15 @@ The CN (Common Name) will be used to identify the client. For this project, ther
 
 #### Authorization
 
-GRPC authorization will be done with Authz golang package with a simple authorization requiring username, which is the TLS certificate common name. Static unary and stream interceptors will be created to perform the authz check. The server will verify if the username matches one of the known users that has access. If the username field matches the hardcoded "alice" or "bob" values, full access will be allowed to the APIs by adding the following key-value pairs in the metadata: 
+Jobs are associated with the user that created the job and authorization will be done by checking if a user has access to a job before displaying any information or stopping the job. The username will come from the TLS certificate's common name field. The affected APIs are StopJob and QueryJob that require a job id. What this means is the user Alice will not be able to access user Bob's jobs even if she has the job id.
 
-| API         | Metadata Key Pairs |
-| ----------- | ----------- |
-| JobStart    | allow_start=true |
-| JobStop     | allow_stop=true |
-| JobQuery    | allow_query=true |
-
-Alice and Bob will have full access. Carl will have a valid certificate but will not have any access to any API and can be used to test authorization.
-
-This method is very similar to passing an API key. Security-wise, it's okay since the TLS certificates are signed by a CA cert and the server trusts the CA. It's not a scalable solution because it's static. Adding a user database resolves the static user issue but performance remains an issue for each API request to check against the database. Extending the implementation to a token auth would resolve the scalability issue.
+Security-wise, it's okay since the TLS certificates are signed by a CA cert and the server trusts the CA.
 
 ## Build / Package
-Github Actions will be used to build and package the client and server. The end result will be a tar.gz file that can be unpacked and ran without having to generate certificates.
+
+A simple `build.sh` script will be provided to build the client and server with their pregenerated certificates. The end result will be a `bin` folder containing the binaries and the certificates.
+
+In the future, github actions can be used to build and package the client and server. The end result will be a tar.gz file that can be unpacked and ran without having to generate certificates.
 
 ## Test Plan
 
