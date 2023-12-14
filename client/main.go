@@ -37,9 +37,6 @@ var (
 
 	query   = app.Command("query", "Query a job")
 	queryid = query.Arg("id", "job id").Required().String()
-
-	logCmd = app.Command("log", "Get job logs")
-	logid  = logCmd.Arg("id", "job id").Required().String()
 )
 
 func startJob(client worker.WorkerClient, message []string) {
@@ -50,8 +47,23 @@ func startJob(client worker.WorkerClient, message []string) {
 	if err != nil {
 		log.Fatalf("client = %v: ", err)
 	}
+	done := make(chan struct{})
 
-	jobLog(client, resp.JobId)
+	go func() {
+		for {
+			resp, err := resp.Recv()
+			if err == io.EOF {
+				done <- struct{}{} //means stream is finished
+				return
+			}
+			if err != nil {
+				log.Fatalf("cannot receive %v", err)
+			}
+			log.Printf("Resp received:%s:  %s", resp.JobId, resp.Log)
+		}
+	}()
+
+	<-done
 }
 
 func stopJob(client worker.WorkerClient, jobID string) {
@@ -71,33 +83,6 @@ func queryJob(client worker.WorkerClient, jobID string) {
 		log.Fatalf("client = %v: ", err)
 	}
 	log.Printf("Job status is: %s", resp.Status)
-}
-
-func jobLog(client worker.WorkerClient, jobID string) {
-	fmt.Println("sending log request")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	resp, err := client.JobLog(ctx, &worker.WorkerLogRequest{JobId: jobID})
-	if err != nil {
-		log.Fatalf("client = %v: ", err)
-	}
-	done := make(chan struct{})
-
-	go func() {
-		for {
-			resp, err := resp.Recv()
-			if err == io.EOF {
-				done <- struct{}{} //means stream is finished
-				return
-			}
-			if err != nil {
-				log.Fatalf("cannot receive %v", err)
-			}
-			log.Printf("[%s]: %s", resp.JobId, resp.Log)
-		}
-	}()
-
-	<-done
 }
 
 func setupTLSConfig() (*tls.Config, error) {
@@ -152,7 +137,5 @@ func main() {
 		stopJob(workerClient, *stopid)
 	case query.FullCommand():
 		queryJob(workerClient, *queryid)
-	case logCmd.FullCommand():
-		jobLog(workerClient, *logid)
 	}
 }

@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"sync"
 
 	worker "github.com/sbui-dev/jobworker/data/proto"
 	joblib "github.com/sbui-dev/jobworker/lib"
@@ -31,16 +30,8 @@ const (
 var port = flag.Int("port", 50005, "the port to serve on")
 
 type workerServer struct {
-	JobWorker      *joblib.JobWorker
-	mutex          sync.Mutex
-	jobSubscribers map[*joblib.JobInfo][]chan string
+	JobWorker *joblib.JobWorker
 	worker.UnimplementedWorkerServer
-}
-
-func newWorkerServer() *workerServer {
-	jw := joblib.NewJobWorker()
-	js := make(map[*joblib.JobInfo][]chan string)
-	return &workerServer{JobWorker: jw, jobSubscribers: js}
 }
 
 func getUserFromCertificate(ctx context.Context) (string, error) {
@@ -64,13 +55,14 @@ func getUserFromCertificate(ctx context.Context) (string, error) {
 	return username, nil
 }
 
-func (w *workerServer) JobStart(ctx context.Context, req *worker.WorkerStartRequest) (*worker.WorkerStartResponse, error) {
+func (w *workerServer) JobStart(req *worker.WorkerStartRequest, stream worker.Worker_JobStartServer) error {
 	fmt.Printf("Creating new job: %s\n", req.Command)
 
+	ctx := stream.Context()
 	username, err := getUserFromCertificate(ctx)
 	if err != nil {
 		fmt.Printf("%v", err)
-		return nil, err
+		return err
 	}
 
 	newJob, err := joblib.NewJob(req.Command)
@@ -83,29 +75,26 @@ func (w *workerServer) JobStart(ctx context.Context, req *worker.WorkerStartRequ
 
 	fmt.Println("Job starting")
 	go newJob.Start()
+	outChan := newJob.GetOutputChannel()
 
-	// outChan := newJob.GetOutputChannel()
-
-	// for {
-	// 	select {
-	// 	case <-stream.Context().Done():
-	// 		log.Printf("user closed connection")
-	// 		return nil
-	// 	case out, ok := <-outChan:
-	// 		if !ok {
-	// 			log.Printf("channel closed")
-	// 			return nil
-	// 		}
-	// 		//fmt.Println("sending response")
-	// 		err = stream.Send(&worker.WorkerStartResponse{JobId: newJob.JobID, Log: out})
-	// 		if err != nil {
-	// 			fmt.Println(err.Error())
-	// 			return err
-	// 		}
-	// 	}
-	// }
-
-	return &worker.WorkerStartResponse{JobId: newJob.JobID}, nil
+	for {
+		select {
+		case <-stream.Context().Done():
+			log.Printf("user closed connection")
+			return nil
+		case out, ok := <-outChan:
+			if !ok {
+				log.Printf("channel closed")
+				return nil
+			}
+			fmt.Println("sending response")
+			err = stream.Send(&worker.WorkerStartResponse{JobId: newJob.JobID, Log: out})
+			if err != nil {
+				fmt.Println(err.Error())
+				return err
+			}
+		}
+	}
 }
 
 func (w *workerServer) JobStop(ctx context.Context, req *worker.WorkerStopRequest) (*worker.WorkerStopResponse, error) {
@@ -148,92 +137,6 @@ func (w *workerServer) JobQuery(ctx context.Context, req *worker.WorkerQueryRequ
 
 }
 
-func (w *workerServer) SubscribeToJob(job *joblib.JobInfo) (<-chan string, error) {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	newChan := make(chan string)
-	streamArray, ok := w.jobSubscribers[job]
-	if !ok {
-		w.jobSubscribers[job] = []chan string{newChan}
-		return nil, nil
-	}
-	streamArray = append(streamArray, newChan)
-	w.jobSubscribers[job] = streamArray
-	return newChan, nil
-}
-
-func (w *workerServer) UnsubscribeToJob(job *joblib.JobInfo) {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	// TODO fix
-}
-
-func (w *workerServer) Broadcast() {
-	for {
-		for job, chanArray := range w.jobSubscribers {
-			myChan := job.GetOutputChannel()
-			select {
-			case out, ok := <-myChan:
-				if !ok {
-					log.Printf("channel closed")
-					return
-				}
-				fmt.Printf("broadcasting %s\n", out)
-				fmt.Println(len(chanArray))
-				for _, sub := range chanArray {
-					sub <- out
-					fmt.Println("broadcasted")
-				}
-			}
-		}
-	}
-}
-
-func (w *workerServer) StreamJobLogs(jobID string, myChan <-chan string, stream worker.Worker_JobLogServer) {
-	for {
-		select {
-		case <-stream.Context().Done():
-			log.Printf("user closed connection")
-			return
-		case out, ok := <-myChan:
-			fmt.Println("received data to send")
-			if !ok {
-				log.Printf("channel closed")
-				return
-			}
-
-			err := stream.Send(&worker.WorkerLogResponse{JobId: jobID, Log: out})
-			if err != nil {
-				fmt.Println(err.Error())
-				return
-			}
-		}
-	}
-}
-
-func (w *workerServer) JobLog(req *worker.WorkerLogRequest, stream worker.Worker_JobLogServer) error {
-	fmt.Printf("Log job: %s\n", req.JobId)
-	username, err := getUserFromCertificate(stream.Context())
-	if err != nil {
-		fmt.Printf("%v", err)
-		return err
-	}
-
-	myJob, err := w.JobWorker.FindJob(username, req.JobId)
-	if err != nil {
-		return err
-	}
-
-	myChan, err := w.SubscribeToJob(myJob)
-	if err != nil {
-		return err
-	}
-
-	go w.StreamJobLogs(req.JobId, myChan, stream)
-
-	return nil
-}
-
 func main() {
 	flag.Parse()
 
@@ -258,13 +161,9 @@ func main() {
 		Certificates: []tls.Certificate{cert},
 		ClientCAs:    ca,
 	}
-
+	jw := joblib.NewJobWorker()
 	grpcServer := grpc.NewServer(grpc.Creds(credentials.NewTLS(tlsConfig)))
-
-	workerServer := newWorkerServer()
-	worker.RegisterWorkerServer(grpcServer, workerServer)
-	go workerServer.Broadcast()
-
+	worker.RegisterWorkerServer(grpcServer, &workerServer{JobWorker: jw})
 	lis, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", *port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)

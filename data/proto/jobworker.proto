@@ -14,12 +14,9 @@ message WorkerQueryRequest{
   string job_id = 1;
 }
 
-message WorkerLogRequest{
-  string job_id = 1;
-}
-
 message WorkerStartResponse {
   string job_id = 1;
+  string log = 2;
 }
 
 message WorkerStopResponse {
@@ -30,17 +27,10 @@ message WorkerQueryResponse {
   string status = 2;
 }
 
-message WorkerLogResponse {
-  string job_id = 1;
-  string log = 2;
-}
-
 service Worker {
   rpc JobStop(WorkerStopRequest) returns (WorkerStopResponse) {}
 
-  rpc JobStart(WorkerStartRequest) returns (WorkerStartResponse) {}
+  rpc JobStart(WorkerStartRequest) returns (stream WorkerStartResponse) {}
 
   rpc JobQuery(WorkerQueryRequest) returns (WorkerQueryResponse) {}
-
-  rpc JobLog(WorkerLogRequest) returns (stream WorkerLogResponse) {}
 }

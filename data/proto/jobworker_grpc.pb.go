@@ -23,9 +23,8 @@ const _ = grpc.SupportPackageIsVersion7
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type WorkerClient interface {
 	JobStop(ctx context.Context, in *WorkerStopRequest, opts ...grpc.CallOption) (*WorkerStopResponse, error)
-	JobStart(ctx context.Context, in *WorkerStartRequest, opts ...grpc.CallOption) (*WorkerStartResponse, error)
+	JobStart(ctx context.Context, in *WorkerStartRequest, opts ...grpc.CallOption) (Worker_JobStartClient, error)
 	JobQuery(ctx context.Context, in *WorkerQueryRequest, opts ...grpc.CallOption) (*WorkerQueryResponse, error)
-	JobLog(ctx context.Context, in *WorkerLogRequest, opts ...grpc.CallOption) (Worker_JobLogClient, error)
 }
 
 type workerClient struct {
@@ -45,13 +44,36 @@ func (c *workerClient) JobStop(ctx context.Context, in *WorkerStopRequest, opts 
 	return out, nil
 }
 
-func (c *workerClient) JobStart(ctx context.Context, in *WorkerStartRequest, opts ...grpc.CallOption) (*WorkerStartResponse, error) {
-	out := new(WorkerStartResponse)
-	err := c.cc.Invoke(ctx, "/main.Worker/JobStart", in, out, opts...)
+func (c *workerClient) JobStart(ctx context.Context, in *WorkerStartRequest, opts ...grpc.CallOption) (Worker_JobStartClient, error) {
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[0], "/main.Worker/JobStart", opts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &workerJobStartClient{stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+type Worker_JobStartClient interface {
+	Recv() (*WorkerStartResponse, error)
+	grpc.ClientStream
+}
+
+type workerJobStartClient struct {
+	grpc.ClientStream
+}
+
+func (x *workerJobStartClient) Recv() (*WorkerStartResponse, error) {
+	m := new(WorkerStartResponse)
+	if err := x.ClientStream.RecvMsg(m); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 func (c *workerClient) JobQuery(ctx context.Context, in *WorkerQueryRequest, opts ...grpc.CallOption) (*WorkerQueryResponse, error) {
@@ -63,46 +85,13 @@ func (c *workerClient) JobQuery(ctx context.Context, in *WorkerQueryRequest, opt
 	return out, nil
 }
 
-func (c *workerClient) JobLog(ctx context.Context, in *WorkerLogRequest, opts ...grpc.CallOption) (Worker_JobLogClient, error) {
-	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[0], "/main.Worker/JobLog", opts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &workerJobLogClient{stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-type Worker_JobLogClient interface {
-	Recv() (*WorkerLogResponse, error)
-	grpc.ClientStream
-}
-
-type workerJobLogClient struct {
-	grpc.ClientStream
-}
-
-func (x *workerJobLogClient) Recv() (*WorkerLogResponse, error) {
-	m := new(WorkerLogResponse)
-	if err := x.ClientStream.RecvMsg(m); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
 // WorkerServer is the server API for Worker service.
 // All implementations must embed UnimplementedWorkerServer
 // for forward compatibility
 type WorkerServer interface {
 	JobStop(context.Context, *WorkerStopRequest) (*WorkerStopResponse, error)
-	JobStart(context.Context, *WorkerStartRequest) (*WorkerStartResponse, error)
+	JobStart(*WorkerStartRequest, Worker_JobStartServer) error
 	JobQuery(context.Context, *WorkerQueryRequest) (*WorkerQueryResponse, error)
-	JobLog(*WorkerLogRequest, Worker_JobLogServer) error
 	mustEmbedUnimplementedWorkerServer()
 }
 
@@ -113,14 +102,11 @@ type UnimplementedWorkerServer struct {
 func (UnimplementedWorkerServer) JobStop(context.Context, *WorkerStopRequest) (*WorkerStopResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method JobStop not implemented")
 }
-func (UnimplementedWorkerServer) JobStart(context.Context, *WorkerStartRequest) (*WorkerStartResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method JobStart not implemented")
+func (UnimplementedWorkerServer) JobStart(*WorkerStartRequest, Worker_JobStartServer) error {
+	return status.Errorf(codes.Unimplemented, "method JobStart not implemented")
 }
 func (UnimplementedWorkerServer) JobQuery(context.Context, *WorkerQueryRequest) (*WorkerQueryResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method JobQuery not implemented")
-}
-func (UnimplementedWorkerServer) JobLog(*WorkerLogRequest, Worker_JobLogServer) error {
-	return status.Errorf(codes.Unimplemented, "method JobLog not implemented")
 }
 func (UnimplementedWorkerServer) mustEmbedUnimplementedWorkerServer() {}
 
@@ -153,22 +139,25 @@ func _Worker_JobStop_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Worker_JobStart_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(WorkerStartRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _Worker_JobStart_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WorkerStartRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(WorkerServer).JobStart(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/main.Worker/JobStart",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(WorkerServer).JobStart(ctx, req.(*WorkerStartRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(WorkerServer).JobStart(m, &workerJobStartServer{stream})
+}
+
+type Worker_JobStartServer interface {
+	Send(*WorkerStartResponse) error
+	grpc.ServerStream
+}
+
+type workerJobStartServer struct {
+	grpc.ServerStream
+}
+
+func (x *workerJobStartServer) Send(m *WorkerStartResponse) error {
+	return x.ServerStream.SendMsg(m)
 }
 
 func _Worker_JobQuery_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -189,27 +178,6 @@ func _Worker_JobQuery_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Worker_JobLog_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(WorkerLogRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
-	}
-	return srv.(WorkerServer).JobLog(m, &workerJobLogServer{stream})
-}
-
-type Worker_JobLogServer interface {
-	Send(*WorkerLogResponse) error
-	grpc.ServerStream
-}
-
-type workerJobLogServer struct {
-	grpc.ServerStream
-}
-
-func (x *workerJobLogServer) Send(m *WorkerLogResponse) error {
-	return x.ServerStream.SendMsg(m)
-}
-
 // Worker_ServiceDesc is the grpc.ServiceDesc for Worker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -222,18 +190,14 @@ var Worker_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Worker_JobStop_Handler,
 		},
 		{
-			MethodName: "JobStart",
-			Handler:    _Worker_JobStart_Handler,
-		},
-		{
 			MethodName: "JobQuery",
 			Handler:    _Worker_JobQuery_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
-			StreamName:    "JobLog",
-			Handler:       _Worker_JobLog_Handler,
+			StreamName:    "JobStart",
+			Handler:       _Worker_JobStart_Handler,
 			ServerStreams: true,
 		},
 	},
