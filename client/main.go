@@ -50,23 +50,8 @@ func startJob(client worker.WorkerClient, message []string) {
 	if err != nil {
 		log.Fatalf("client = %v: ", err)
 	}
-	done := make(chan struct{})
 
-	go func() {
-		for {
-			resp, err := resp.Recv()
-			if err == io.EOF {
-				done <- struct{}{} //means stream is finished
-				return
-			}
-			if err != nil {
-				log.Fatalf("cannot receive %v", err)
-			}
-			log.Printf("[%s]: %s", resp.JobId, resp.Log)
-		}
-	}()
-
-	<-done
+	jobLog(client, resp.JobId)
 }
 
 func stopJob(client worker.WorkerClient, jobID string) {
@@ -89,7 +74,7 @@ func queryJob(client worker.WorkerClient, jobID string) {
 }
 
 func jobLog(client worker.WorkerClient, jobID string) {
-	fmt.Println("sending job")
+	fmt.Println("sending log request")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	resp, err := client.JobLog(ctx, &worker.WorkerLogRequest{JobId: jobID})

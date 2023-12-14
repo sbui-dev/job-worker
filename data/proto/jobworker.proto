@@ -1,0 +1,46 @@
+syntax = "proto3";
+package main;
+option go_package = "jobworker.data";
+
+message WorkerStartRequest {
+  repeated string command = 1;
+}
+
+message WorkerStopRequest{
+  string job_id = 1;
+}
+
+message WorkerQueryRequest{
+  string job_id = 1;
+}
+
+message WorkerLogRequest{
+  string job_id = 1;
+}
+
+message WorkerStartResponse {
+  string job_id = 1;
+}
+
+message WorkerStopResponse {
+}
+
+message WorkerQueryResponse {
+  string job_id = 1;
+  string status = 2;
+}
+
+message WorkerLogResponse {
+  string job_id = 1;
+  string log = 2;
+}
+
+service Worker {
+  rpc JobStop(WorkerStopRequest) returns (WorkerStopResponse) {}
+
+  rpc JobStart(WorkerStartRequest) returns (WorkerStartResponse) {}
+
+  rpc JobQuery(WorkerQueryRequest) returns (WorkerQueryResponse) {}
+
+  rpc JobLog(WorkerLogRequest) returns (stream WorkerLogResponse) {}
+}

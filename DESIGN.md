@@ -23,21 +23,17 @@ The following will be exported funcs to be used by the server
 func NewJob(command []string) (*Job, error)
 
 // Start starts a job by executing the command
-func (jw *Job) Start()
+func (jw *JobInfo) Start()
 
 // Stop stops a job using the id sent in
-func (jw *Job) Stop()
+func (jw *JobInfo) Stop()
 
 // Query shows job status
-func (jw *Job) Query(jobID string)
+func (jw *JobInfo) Query(jobID string)
 
 // GetOutputChannel gets job output channel for streaming process output
 // return: go channel of output
-func (jw *Job) GetOutputChannel() chan string
-
-// GetDoneChannel gets done channel to block until process is completed
-// return: go channel of done
-func (jw *Job) GetDoneChannel() chan bool
+func (jw *JobInfo) GetOutputChannel() chan string
 ```
 
 ### Data Structures
@@ -45,38 +41,31 @@ The following data structures will be used to represent the job/process
 ```
 // key: username
 // value: array of job ids
-userJobs := map[string][]string
+UserJobs := map[string][]string
 ```
 
 The map will be keeping track and used to look up what jobs a specific user has ran. This provides an added security where it prevent users from accessing other user processes.
 
 ```
 // jobInfo represents the job
-// ctx: context to cancel the job
+// cancelJob: context to cancel the job
 // status: job is either running or stopped
 // output: output of the job
 type JobInfo struct {
 	JobID      string
 	status     string
-	ctx        context.Context
-	cancel     context.CancelFunc
+	cancelJob  context.CancelFunc
 	outputChan chan string
-	done       chan bool
 	command    []string
   output     strings.Builder
 }
-
-// key: job id
-// value: pid info
-jobInfo := map[string]jobInfo
 ``````
 
-This jobInfo map with jobInfo struct will be for looking up the process and information related to the process.
+This jobInfo map with JobInfo struct will be for looking up the process and information related to the process.
 
 ```
 type JobWorker struct {
-    userJobs map[string][]string
-    jobInfo map[string]jobInfo
+    userJobs map[string]JobInfo
 }
 ```
 
@@ -115,17 +104,17 @@ New jobs will add their pid to cgroup file in their respective user folders. For
 
 ### Job Life Cycle
 
-Start func checks if username exists in `userJobs` map and will handle creation or update a user's job array accordingly. The command line parser library will return user command as a string array, which the server will use `exec.CommandContext(ctx, []user_command_array)`. Then update the `jobInfo` map with a new job struct containing: a uuid for the job, running status, and the output. The pid will be added to the user's cgroup i.e. `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`.
+Start func checks if username exists in `userJobs` map and will handle creation or update a user's job array accordingly. The user command line will be a string array, which the server will use `exec.CommandContext(ctx, []user_command_array)`. Then update the `jobInfo` map with a new job struct containing: a uuid for the job, running status, and the output. The pid will be added to the user's cgroup i.e. `/sys/fs/cgroup/remote-tasks/alice/cgroup.procs`.
 
 Stop func will use the stored context cancel with the `exec.CommandContext()` to kill the process and update the `jobInfo` status to stopped.
 
-Query func will look up the pid inside the `userJob` map first before looking inside the `jobInfo` map for the `job`. Then it display the job status.
+Query func will look up the job id inside the `userJob` map first before looking inside the `jobInfo` map for the `job`. Then it display the job status.
 
-GetOutputChannel func and GetDoneChannel func are both used to get a stream output from the running process.
+GetOutputChannel func is used to get a stream output from the running process.
 
 ## Client/Server
 ### Client
-A third party command line parser will be used to parse arguments. For ease of use, the client will support only a single server with hardcoded a port number 57533 (random high number port to avoid port conflicts). The default server address will be `localhost` but another server ip may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
+For ease of use, the client will support only a single server with hardcoded a port number 57533 (random high number port to avoid port conflicts). The default server address will be `localhost` but another server ip and port may be specified via command line argument. These variables may be changed in the future with use of command line args, configuration files, or environment variables. Also for ease of use, the client will have 3 user profiles to switch between the pregenerated certs.
 
 #### Client CLI
 ```
@@ -152,9 +141,9 @@ query <id>
     Query a job
 ```
 
-After a job is started, the client will periodically check the stream to display new output from the job until it has completed.
+After a job is started, the client will start streaming the output from received from the server until the job has completed.
 
-After a job is queried, the client will output everything from the beginning to latest. If the job is still running, it will periodically check the stream to display new output from the job.
+After a job is queried, the client will start streaming from the beginning to latest. If the job is still running, it will continue to stream the output from the server.
 
 The client will receive a confirmation that a job is stopped
 
@@ -199,6 +188,9 @@ service Worker {
   rpc JobQuery(WorkerQueryRequest) returns (stream WorkerQueryResponse) {}
 }
 ```
+
+### Streaming
+The server will use the oberserver pattern to broadcast output to multiple concurrent clients. It maintain a list of clients that are subscribed to a specific job. Each time the server receives output from the `OutputChan`, it'll replicate the output to the clients via 
 
 ### Security
 #### mTLS
